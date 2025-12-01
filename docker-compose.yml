@@ -1,0 +1,107 @@
+version: '3.9'
+
+services:
+  api:
+    build: .
+    command: node dist/main.js
+    env_file: .env
+    environment:
+      APP_HOST: 0.0.0.0
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: ${DATABASE_USER:-wallet}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-wallet}
+      DATABASE_NAME: ${DATABASE_NAME:-wallet}
+      DATABASE_SYNC: ${DATABASE_SYNC:-true}
+      DATABASE_LOGGING: ${DATABASE_LOGGING:-false}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/wallet
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+      - rabbitmq
+      - redis
+
+  worker:
+    build: .
+    command: node dist/main-listener.js
+    env_file: .env
+    environment:
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: ${DATABASE_USER:-wallet}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-wallet}
+      DATABASE_NAME: ${DATABASE_NAME:-wallet}
+      DATABASE_SYNC: ${DATABASE_SYNC:-false}
+      DATABASE_LOGGING: ${DATABASE_LOGGING:-false}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/wallet
+    depends_on:
+      - postgres
+      - rabbitmq
+      - redis
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DATABASE_NAME:-wallet}
+      POSTGRES_USER: ${DATABASE_USER:-wallet}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-wallet}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    command: >
+      sh -c "rabbitmq-server &
+      sleep 10 &&
+      rabbitmqctl add_vhost wallet &&
+      rabbitmqctl set_permissions -p wallet guest \".*\" \".*\" \".*\" &&
+      rabbitmqadmin --username=guest --password=guest --vhost=wallet declare exchange name=wallet.dlx type=direct durable=true &&
+      rabbitmqadmin --username=guest --password=guest --vhost=wallet declare queue name=wallet.events.dlq durable=true &&
+      rabbitmqadmin --username=guest --password=guest --vhost=wallet declare queue name=wallet.events durable=true arguments='{\"x-dead-letter-exchange\":\"wallet.dlx\",\"x-dead-letter-routing-key\":\"wallet.events.dlq\"}' &&
+      rabbitmqadmin --username=guest --password=guest --vhost=wallet declare binding source=wallet.dlx destination=wallet.events.dlq routing_key=wallet.events.dlq &&
+      tail -f /dev/null"
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  k6:
+    image: grafana/k6:latest
+    profiles: ["loadtest"]
+    environment:
+      K6_BASE_URL: http://api:3000
+    volumes:
+      - ./k6:/scripts
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["k6 run /scripts/load-test.js"]
+    depends_on:
+      - api
+      - worker
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  redis_data:
